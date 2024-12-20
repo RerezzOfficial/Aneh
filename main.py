@@ -1,84 +1,116 @@
-
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
+import time
 
-Pengaturan akun FBS
-akun = "Nomor Akun Anda"
-password = "Kata Sandi Anda"
-server = "FBS-Real"
+# Pengaturan akun FBS
+AKUN = "Nomor Akun Anda"
+PASSWORD = "Kata Sandi Anda"
+SERVER = "FBS-Real"
 
-Pengaturan symbol dan timeframe
-symbol = "EURUSD"
-timeframe = mt5.TIMEFRAME_M1
+# Pengaturan simbol dan timeframe
+SYMBOL = "EURUSD"
+TIMEFRAME = mt5.TIMEFRAME_M1
+LOT_SIZE = 0.1
+DEVIATION = 20
 
-Fungsi analisis teknikal
-def analisis_teknikal():
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 100)
+# Fungsi inisialisasi MT5
+def initialize_mt5():
+    if not mt5.initialize():
+        print(f"MT5 initialization failed: {mt5.last_error()}")
+        return False
+    if not mt5.login(AKUN, PASSWORD, SERVER):
+        print(f"Login failed: {mt5.last_error()}")
+        mt5.shutdown()
+        return False
+    print("MT5 initialized and logged in successfully")
+    return True
+
+# Fungsi untuk mengambil data historis
+def get_data(symbol, timeframe, n_bars=200):
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, n_bars)
+    if rates is None:
+        print(f"Failed to get rates: {mt5.last_error()}")
+        return None
     df = pd.DataFrame(rates)
+    df['time'] = pd.to_datetime(df['time'], unit='s')  # Konversi waktu ke datetime
+    return df
+
+# Fungsi analisis teknikal
+def analisis_teknikal(df):
+    # Validasi data
+    if df is None or len(df) < 200:
+        print("Insufficient data for analysis")
+        return None
     
     # Moving Average
     df['MA_50'] = df['close'].rolling(window=50).mean()
     df['MA_200'] = df['close'].rolling(window=200).mean()
-    
+
     # RSI
     delta = df['close'].diff()
-    gain, loss = delta.copy(), delta.copy()
-    gain[gain < 0] = 0
-    loss[loss > 0] = 0
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = abs(loss).rolling(window=14).mean()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14).mean()
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # Kondisi beli
+
+    # Sinyal beli atau jual
     if df['MA_50'].iloc[-1] > df['MA_200'].iloc[-1] and df['RSI'].iloc[-1] < 30:
-        return True
-    else:
+        return "buy"
+    elif df['MA_50'].iloc[-1] < df['MA_200'].iloc[-1] and df['RSI'].iloc[-1] > 70:
+        return "sell"
+    return None
+
+# Fungsi untuk mengirim order
+def send_order(order_type):
+    tick = mt5.symbol_info_tick(SYMBOL)
+    if tick is None:
+        print(f"Failed to get tick info: {mt5.last_error()}")
         return False
 
-Fungsi membeli
-def beli():
+    price = tick.bid if order_type == mt5.ORDER_TYPE_BUY else tick.ask
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "volume": 0.1,
-        "type": mt5.OP_BUY,
-        "price": mt5.symbol_info_tick(symbol).bid,
-        "deviation": 20,
+        "symbol": SYMBOL,
+        "volume": LOT_SIZE,
+        "type": order_type,
+        "price": price,
+        "deviation": DEVIATION,
         "magic": 234000,
         "comment": "Robot Trading",
-        "type_time": mt5.TIME_GTC
+        "type_time": mt5.ORDER_TIME_GTC
     }
-    result = mt5.order_send(request)
-    print("Order beli berhasil")
 
-Fungsi menjual
-def jual():
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "volume": 0.1,
-        "type": mt5.OP_SELL,
-        "price": mt5.symbol_info_tick(symbol).ask,
-        "deviation": 20,
-        "magic": 234000,
-        "comment": "Robot Trading",
-        "type_time": mt5.TIME_GTC
-    }
     result = mt5.order_send(request)
-    print("Order jual berhasil")
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(f"Order failed: {result.comment}")
+        return False
 
-Eksekusi trade
+    print(f"Order {order_type} sent successfully")
+    return True
+
+# Fungsi utama eksekusi trading
 def eksekusi_trade():
-    if analisis_teknikal():
-        beli()
-    else:
-        jual()
+    df = get_data(SYMBOL, TIMEFRAME)
+    sinyal = analisis_teknikal(df)
+    if sinyal == "buy":
+        send_order(mt5.ORDER_TYPE_BUY)
+    elif sinyal == "sell":
+        send_order(mt5.ORDER_TYPE_SELL)
 
-Jalankan robot trading
-mt5.initialize()
-mt5.login(akun, password, server)
-while True:
-    eksekusi_trade()
-    time.sleep(60)
+# Main program
+if __name__ == "__main__":
+    if not initialize_mt5():
+        exit()
+
+    try:
+        while True:
+            eksekusi_trade()
+            time.sleep(60)  # Tunggu 1 menit sebelum eksekusi berikutnya
+    except KeyboardInterrupt:
+        print("Trading stopped manually")
+    finally:
+        mt5.shutdown()
+        
